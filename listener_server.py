@@ -8,12 +8,15 @@ import json
 import threading
 import time
 import platform
+import subprocess
+import re
 from flask import Flask, render_template_string
 
 BROADCAST_PORT = 50001
 WEB_PORT = 5080
 
-# 存储发现的设备: {ip: {hostname, ip, last_seen}}
+# 存储发现的设备: {hostname: {hostname, ip, last_seen}}
+# 按主机名去重，同一主机名的新广播会替换旧记录（IP变化时自动更新）
 discovered_devices = {}
 lock = threading.Lock()
 
@@ -36,7 +39,27 @@ def is_lan_ip(ip):
 
 
 def get_local_ip():
-    """获取本机局域网IP地址，优先匹配常见的局域网网段"""
+    """获取本机局域网IP地址，使用多种方法确保拿到真实局域网IP"""
+
+    # 方法1: 直接解析 ifconfig / ipconfig 输出（最可靠，不受VPN干扰）
+    ip = _get_ip_via_ifconfig()
+    if ip:
+        return ip
+
+    # 方法2: 尝试连接局域网网关IP（VPN通常不会劫持LAN网段路由）
+    for target in ["192.168.1.1", "192.168.0.1", "10.0.0.1", "172.16.0.1"]:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1)
+            s.connect((target, 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if is_lan_ip(ip):
+                return ip
+        except Exception:
+            pass
+
+    # 方法3: 通过连接公网IP获取默认路由IP
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -46,6 +69,8 @@ def get_local_ip():
             return ip
     except Exception:
         pass
+
+    # 方法4: 连接 10.255.255.255 尝试获取IP
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("10.255.255.255", 1))
@@ -55,14 +80,49 @@ def get_local_ip():
             return ip
     except Exception:
         pass
+
+    # 方法5: 通过 getaddrinfo 枚举所有本机IP
     try:
         hostname = socket.gethostname()
-        ip = socket.gethostbyname(hostname)
-        if ip != "127.0.0.1" and not ip.startswith("127."):
-            return ip
+        addrs = socket.getaddrinfo(hostname, None)
+        for addr in addrs:
+            ip = addr[4][0]
+            if is_lan_ip(ip):
+                return ip
     except Exception:
         pass
+
     return "127.0.0.1"
+
+
+def _get_ip_via_ifconfig():
+    """通过系统命令 ifconfig/ipconfig 获取局域网IP"""
+    try:
+        # macOS / Linux
+        result = subprocess.run(
+            ["ifconfig"], capture_output=True, text=True, timeout=5
+        )
+        pattern = r'inet (\d+\.\d+\.\d+\.\d+)'
+        matches = re.findall(pattern, result.stdout)
+        for ip in matches:
+            if is_lan_ip(ip):
+                return ip
+    except Exception:
+        pass
+    try:
+        # Windows 备选
+        result = subprocess.run(
+            ["ipconfig"], capture_output=True, text=True, timeout=5,
+            shell=True
+        )
+        pattern = r'IPv4[^:]*:\s*(\d+\.\d+\.\d+\.\d+)'
+        matches = re.findall(pattern, result.stdout)
+        for ip in matches:
+            if is_lan_ip(ip):
+                return ip
+    except Exception:
+        pass
+    return None
 
 app = Flask(__name__)
 
@@ -312,7 +372,7 @@ def api_devices():
         devices_list = []
         now = time.time()
         online_count = 0
-        for ip, info in discovered_devices.items():
+        for hostname, info in discovered_devices.items():
             online = (now - info["last_seen"]) < TIMEOUT
             if online:
                 online_count += 1
@@ -346,8 +406,12 @@ def udp_listener():
             hostname = message.get("hostname", "Unknown")
             ip = message.get("ip", addr[0])
 
+            # 忽略 127.0.0.1 的广播（无效局域网IP）
+            if ip == "127.0.0.1" or ip.startswith("127."):
+                continue
+
             with lock:
-                discovered_devices[ip] = {
+                discovered_devices[hostname] = {
                     "hostname": hostname,
                     "ip": ip,
                     "last_seen": time.time()
@@ -363,10 +427,10 @@ def cleanup_thread():
         time.sleep(30)
         with lock:
             now = time.time()
-            expired = [ip for ip, info in discovered_devices.items()
+            expired = [hostname for hostname, info in discovered_devices.items()
                        if now - info["last_seen"] > 300]  # 5分钟无响应则移除
-            for ip in expired:
-                del discovered_devices[ip]
+            for hostname in expired:
+                del discovered_devices[hostname]
             if expired:
                 print(f"[清理] 已移除 {len(expired)} 个过期设备")
 
