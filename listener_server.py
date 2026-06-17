@@ -20,6 +20,50 @@ lock = threading.Lock()
 # 超时时间（秒），超过此时间未收到广播则认为设备离线
 TIMEOUT = 15
 
+
+def is_lan_ip(ip):
+    """判断是否为局域网IP"""
+    if ip.startswith("127."):
+        return False
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    return (a == 10) or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
+
+
+def get_local_ip():
+    """获取本机局域网IP地址，优先匹配常见的局域网网段"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if is_lan_ip(ip):
+            return ip
+    except Exception:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        if is_lan_ip(ip):
+            return ip
+    except Exception:
+        pass
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        if ip != "127.0.0.1" and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
 app = Flask(__name__)
 
 # CORS 支持 - 允许 Cloudflare Pages 等外部页面跨域访问
@@ -334,13 +378,7 @@ def self_broadcast():
 
     # 获取本机信息
     hostname = platform.node()
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
-    except Exception:
-        local_ip = "127.0.0.1"
+    local_ip = get_local_ip()
 
     print(f"[自广播] 本机名称: {hostname}, IP: {local_ip}")
 
