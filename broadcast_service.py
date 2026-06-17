@@ -12,15 +12,56 @@ BROADCAST_INTERVAL = 3  # 秒
 
 
 def get_local_ip():
-    """获取本机局域网IP地址"""
+    """获取本机局域网IP地址，优先匹配常见的局域网网段"""
     try:
+        # 方法1: 通过连接获取默认路由IP
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
-        return ip
+        # 如果返回的是有效的局域网IP则直接使用
+        if is_lan_ip(ip):
+            return ip
     except Exception:
-        return "127.0.0.1"
+        pass
+
+    # 方法2: UUID方式获取（Linux友好）
+    try:
+        import uuid
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        if is_lan_ip(ip):
+            return ip
+    except Exception:
+        pass
+
+    # 方法3: 通过hostname解析
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        if ip != "127.0.0.1" and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+
+    return "127.0.0.1"
+
+
+def is_lan_ip(ip):
+    """判断是否为局域网IP"""
+    if ip.startswith("127."):
+        return False
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        a, b = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    # 192.168.x.x, 10.x.x.x, 172.16-31.x.x
+    return (a == 10) or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
 
 
 def get_computer_name():
